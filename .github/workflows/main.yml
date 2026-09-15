@@ -21,10 +21,12 @@ jobs:
             bison flex libssl-dev bc libncurses-dev make git qemu-user-static \
             kpartx parted xz-utils dosfstools debootstrap u-boot-tools
 
+      # --- ШАГ 1: КЛОНИРОВАНИЕ ОФИЦИАЛЬНОГО ЯДРА COREELEC И КОМПИЛЯЦИЯ ---
       - name: Clone CoreELEC Kernel & Compile
         run: |
-          echo "Скачиваем исходные коды из официального репозитория CoreELEC..."
-          git clone --depth 1 -b amlogic-5.4.210 https://github.com/CoreELEC/linux-amlogic.git
+          echo "Скачиваем исходные коды ядра..."
+          # СЮДА ВСТАВЬТЕ АДРЕС ЯДРА (Оставьте пробел и kernel_source в конце!)
+          git clone --depth 1 -b amlogic-5.4.210 https://github.com/CoreELEC/linux-amlogic.git kernel_source
           
           cd kernel_source
           echo "Текущая директория компиляции ядра: $(pwd)"
@@ -49,17 +51,19 @@ jobs:
           make -j$(nproc) Image dtbs
           
           if [ ! -f "arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb" ]; then
-            echo "КРИТИЧЕСКАЯ ОШИБКА: Целевой файл s4_s905w2_4g.dtb не найден в dts/amlogic!" && exit 1
+            echo "КРИТИЧЕСКАЯ ОШИБКА: Целевой файл s4_s905w2_4g.dtb не найден!" && exit 1
           fi
           
-          mkdir -p ../build_output/boot
-          cp arch/arm64/boot/Image ../build_output/boot/vmlinuz-5.4.210
-          cp arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb ../build_output/boot/dtb.img
+          mkdir -p ../../build_output/boot
+          cp arch/arm64/boot/Image ../../build_output/boot/vmlinuz-5.4.210
+          cp arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb ../../build_output/boot/dtb.img
 
+      # --- ШАГ 2: СОЗДАНИЕ ROOTFS ДЛЯ DEBIAN 12 И УСТАНОВКА КОМПОНЕНТОВ ---
       - name: Create Debian 12 RootFS & Install Components
         run: |
           mkdir -p debian_rootfs/root
-          sudo debootstrap --foreign --arch=arm64 --components=main,contrib,non-free-firmware bookworm debian_rootfs/root http://debian.org
+          # СЮДА ВСТАВЬТЕ АДРЕС ЗЕРКАЛА СКАЧИВАНИЯ СИСТЕМЫ DEBIAN (со слэшем в конце)
+          sudo debootstrap --foreign --arch=arm64 --components=main,contrib,non-free-firmware bookworm debian_rootfs/root http://deb.debian.org/debian/
           
           echo "tanix-w2" | sudo tee debian_rootfs/root/etc/hostname
           echo "127.0.0.1 localhost tanix-w2" | sudo tee debian_rootfs/root/etc/hosts
@@ -76,7 +80,8 @@ jobs:
           sudo chroot debian_rootfs/root /debootstrap/debootstrap --second-stage
           
           sudo chroot debian_rootfs/root /bin/bash -c "
-            echo 'deb http://debian.org bookworm main contrib non-free non-free-firmware' > /etc/apt/sources.list
+            # СЮДА ВСТАВЬТЕ АДРЕС ОБНОВЛЕНИЯ ПАКЕТОВ DEBIAN ВНУТРИ СТРОКИ С СИСТЕМНЫМИ РЕПОЗИТОРИЯМИ
+            echo 'deb https://deb.debian.org/debian bookworm main contrib non-free non-free-firmware' > /etc/apt/sources.list
             apt update
             
             ENV DEBIAN_FRONTEND=noninteractive apt install -y \
@@ -116,6 +121,7 @@ jobs:
           "
           sudo rm debian_rootfs/root/usr/bin/qemu-aarch64-static
 
+      # --- ШАГ 3: КОНФИГУРАЦИЯ ЗАГРУЗЧИКА EXT LINUX + UENV ДЛЯ U-BOOT ---
       - name: Create Boot Configuration (Extlinux + uEnv.txt)
         run: |
           mkdir -p ../build_output/boot/extlinux
@@ -135,6 +141,7 @@ jobs:
           uenvcmd=fatload mmc 0:1 ${kernel_addr_r} ${kernel}; fatload mmc 0:1 ${fdt_addr_r} ${dtb}; bootz ${kernel_addr_r} - ${fdt_addr_r}
           EOF2
 
+      # --- ШАГ 4: СБОРКА И ФОРМАТИРОВАНИЕ ОБРАЗА .IMG (4.2 ГБ) ---
       - name: Create Final Flashable .IMG
         run: |
           dd if=/dev/zero of=debian-tanix-w2.img bs=1M count=4200
@@ -164,7 +171,7 @@ jobs:
           
           xz -z -3 debian-tanix-w2.img
 
-      # Выгрузка результата во вкладку Artifacts
+      # --- ШАГ 5: ВЫГРУЗКА ГОТОВОГО РЕЗУЛЬТАТА В АРТЕФАКТЫ ---
       - name: Upload Complete Debian Image
         uses: actions/upload-artifact@v4
         with:
