@@ -26,7 +26,7 @@ jobs:
       - name: Clone CoreELEC Kernel & Compile
         run: |
           echo "Скачиваем исходные коды ядра..."
-          git clone --depth 1 -b amlogic-5.4.210 https://github.com kernel_source
+          git clone --depth 1 -b amlogic-5.4.210 https://github.com/CoreELEC/linux-amlogic.git kernel_source
           
           cd kernel_source
           echo "Текущая директория компиляции ядра: $(pwd)"
@@ -68,7 +68,7 @@ jobs:
         run: |
           mkdir -p debian_rootfs/root
           # Указан верный полный URL репозитория deb.debian.org/debian/ с ca-certificates для работы HTTPS
-          sudo debootstrap --foreign --arch=arm64 --components=main,contrib,non-free-firmware --include=ca-certificates bookworm debian_rootfs/root http://debian.org
+          sudo debootstrap --foreign --arch=arm64 --components=main,contrib,non-free-firmware --include=ca-certificates bookworm debian_rootfs/root http://deb.debian.org/debian/
           
           echo "tanix-w2" | sudo tee debian_rootfs/root/etc/hostname
           echo "127.0.0.1 localhost tanix-w2" | sudo tee debian_rootfs/root/etc/hosts
@@ -86,7 +86,7 @@ jobs:
           
           sudo chroot debian_rootfs/root /bin/bash -c "
             # Прописан верный защищенный адрес репозитория пакетов Debian для apt внутри образа
-            echo 'deb http://debian.org bookworm main contrib non-free non-free-firmware' > /etc/apt/sources.list
+            echo 'deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware' > /etc/apt/sources.list
             apt update
             
             ENV DEBIAN_FRONTEND=noninteractive apt install -y \
