@@ -18,7 +18,7 @@ jobs:
         run: |
           sudo apt update
           # Устанавливаем строго GCC 10 для корректной сборки вендорного ядра 5.4
-          sudo apt install -y gcc-10-aarch64-linux-gnu dtc g++-10-aarch64-linux-gnu \
+          sudo apt install -y gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
             bison flex libssl-dev bc libncurses-dev make git qemu-user-static \
             kpartx parted xz-utils dosfstools debootstrap u-boot-tools
 
