@@ -1,0 +1,177 @@
+name: Build Debian Light (USB Auto-mount + Wireless Drivers) for Tanix W2
+
+on:
+  push:
+    branches:
+      - amlogic-5.4.210
+  workflow_dispatch:
+
+jobs:
+  build-debian-image:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
+            bison flex libssl-dev bc libncurses-dev make git qemu-user-static \
+            kpartx parted xz-utils dosfstools debootstrap u-boot-tools
+
+      # --- ШАГ 1: ВСТРАИВАНИЕ ВЕНДОРНЫХ ДРАЙВЕРОВ И СБОРКА ЯДРА НА GCC 10 ---
+      - name: Compile Linux Kernel with Built-in Vendor Drivers
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-gcc-10-
+          
+          make sc2_defconfig
+          
+          sed -i 's/CONFIG_AMLOGIC_DRM=m/CONFIG_AMLOGIC_DRM=y/g' .config || true
+          sed -i 's/CONFIG_AMLOGIC_FB=m/CONFIG_AMLOGIC_FB=y/g' .config || true
+          sed -i 's/CONFIG_MALI_BIFROST=m/CONFIG_MALI_BIFROST=y/g' .config || true
+          sed -i 's/CONFIG_MALI_MIDGARD=m/CONFIG_MALI_MIDGARD=y/g' .config || true
+          sed -i 's/CONFIG_AMLOGIC_VIDEO=m/CONFIG_AMLOGIC_VIDEO=y/g' .config || true
+          
+          echo "CONFIG_AMLOGIC_DRM=y" >> .config
+          echo "CONFIG_AMLOGIC_FB=y" >> .config
+          echo "CONFIG_MALI_BIFROST=y" >> .config
+          echo "CONFIG_AMLOGIC_VIDEO=y" >> .config
+          
+          make olddefconfig
+          make -j$(nproc) Image dtbs
+          
+          if [ ! -f "arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb" ]; then
+            echo "КРИТИЧЕСКАЯ ОШИБКА: Файл s4_s905w2_4g.dtb не найден!" && exit 1
+          fi
+          
+          mkdir -p ../build_output/boot
+          cp arch/arm64/boot/Image ../build_output/boot/vmlinuz-5.4.210
+          cp arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb ../build_output/boot/dtb.img
+
+      # --- ШАГ 2: СОЗДАНИЕ ROOTFS И УСТАНОВКА КОМПОНЕНТОВ (USB, WI-FI, BLUETOOTH) ---
+      - name: Create Debian RootFS & Install Components
+        run: |
+          mkdir -p debian_rootfs/root
+          # Разворачиваем Debian 12 Bookworm, добавляя секцию non-free-firmware для скачивания прошивок адаптеров
+          sudo debootstrap --foreign --arch=arm64 --components=main,contrib,non-free-firmware bookworm debian_rootfs/root http://debian.org
+          
+          echo "tanix-w2" | sudo tee debian_rootfs/root/etc/hostname
+          echo "127.0.0.1 localhost tanix-w2" | sudo tee debian_rootfs/root/etc/hosts
+          
+          cat << 'EOF' | sudo tee debian_rootfs/root/etc/network/interfaces
+          auto lo
+          iface lo inet loopback
+
+          auto eth0
+          iface eth0 inet dhcp
+          EOF
+
+          sudo cp /usr/bin/qemu-aarch64-static debian_rootfs/root/usr/bin/
+          sudo chroot debian_rootfs/root /debootstrap/debootstrap --second-stage
+          
+          sudo chroot debian_rootfs/root /bin/bash -c "
+            # Добавляем репозитории non-free в sources.list для доступа к прошивкам беспроводных устройств
+            echo 'deb http://debian.org bookworm main contrib non-free non-free-firmware' > /etc/apt/sources.list
+            apt update
+            
+            # Установка базового софта, XFCE4, LightDM
+            ENV DEBIAN_FRONTEND=noninteractive apt install -y \
+              openssh-server sudo mc bluez blueman waybar tint2 xinit lxterminal \
+              xserver-xorg xserver-xorg-video-fbdev weston xwayland \
+              lightdm task-xfce-desktop
+            
+            # Установка компонентов для автоматического монтирования USB (флешек) и файловых систем
+            ENV DEBIAN_FRONTEND=noninteractive apt install -y \
+              gvfs gvfs-backends thunar-volman udiskse2 ntfs-3g exfat-fuse exfat-utils || apt install -y gvfs gvfs-backends thunar-volman udisks2 ntfs-3g exfat-fuse
+              
+            # Установка полного набора прошивок для USB Wi-Fi и Bluetooth свистков (Realtek, Mediatek, Atheros)
+            ENV DEBIAN_FRONTEND=noninteractive apt install -y \
+              firmware-linux firmware-linux-nonfree firmware-realtek firmware-liberation firmware-atheros \
+              wireless-tools wpasupplicant network-manager NetworkManager-gnome
+            
+            echo 'root:root' | chpasswd
+            useradd -m -s /bin/bash al
+            echo 'al:6770' | chpasswd
+            
+            for grp in sudo adm disk video render bluetooth input plugdev netdev; do
+              groupadd -f \$grp
+              usermod -aG \$grp al
+              usermod -aG \$grp root
+            done
+            
+            echo 'root ALL=(ALL:ALL) ALL' > /etc/sudoers.d/custom-rights
+            echo 'al ALL=(ALL:ALL) NOPASSWD:ALL' >> /etc/sudoers.d/custom-rights
+            chmod 0440 /etc/sudoers.d/custom-rights
+            
+            # Включаем NetworkManager для удобного графического управления Wi-Fi в XFCE
+            systemctl enable NetworkManager
+            systemctl enable bluetooth
+            systemctl enable ssh
+            systemctl enable lightdm
+            
+            sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+            sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+            ssh-keygen -A
+          "
+          sudo rm debian_rootfs/root/usr/bin/qemu-aarch64-static
+
+      # --- ШАГ 3: ДВОЙНАЯ КОНФИГУРАЦИЯ ЗАГРУЗЧИКА (СТРАХОВКА U-BOOT) ---
+      - name: Create Boot Configuration (Extlinux + uEnv.txt)
+        run: |
+          mkdir -p ../build_output/boot/extlinux
+          
+          cat << 'EOF' > ../build_output/boot/extlinux/extlinux.conf
+          LABEL Debian
+            LINUX /vmlinuz-5.4.210
+            FDT /dtb.img
+            APPEND root=/dev/mmcblk1p2 rootwait console=ttyAML0,115200n8 console=tty0 loglevel=7 init=/sbin/init rootfstype=ext4 rw amlogic.hdmi=1920x1080M60Hz
+          EOF
+
+          cat << 'EOF2' > ../build_output/boot/uEnv.txt
+          title=Debian XFCE for Tanix W2
+          kernel=/vmlinuz-5.4.210
+          dtb=/dtb.img
+          bootargs=root=/dev/mmcblk1p2 rootwait console=ttyAML0,115200n8 console=tty0 loglevel=7 init=/sbin/init rootfstype=ext4 rw amlogic.hdmi=1920x1080M60Hz
+          uenvcmd=fatload mmc 0:1 ${kernel_addr_r} ${kernel}; fatload mmc 0:1 ${fdt_addr_r} ${dtb}; bootz ${kernel_addr_r} - ${fdt_addr_r}
+          EOF2
+
+      # --- ШАГ 4: СБОРКА ОБРАЗА .IMG ДЛЯ ЗАПИСИ (Размер зафиксирован на 4.2 ГБ под драйверы) ---
+      - name: Create Final Flashable .IMG
+        run: |
+          # Размер немного увеличен, так как пакеты linux-firmware занимают дополнительное место
+          dd if=/dev/zero of=debian-tanix-w2.img bs=1M count=4200
+          
+          sudo parted -s debian-tanix-w2.img mklabel msdos
+          sudo parted -s debian-tanix-w2.img mkpart primary fat32 4MiB 256MiB
+          sudo parted -s debian-tanix-w2.img mkpart primary ext4 256MiB 100%
+          
+          sudo kpartx -av debian-tanix-w2.img
+          
+          sudo mkfs.vfat -n "BOOT" /dev/mapper/loop0p1
+          sudo mkfs.ext4 -F -L "ROOTFS" /dev/mapper/loop0p2
+          
+          mkdir -p mnt/boot mnt/rootfs
+          sudo mount /dev/mapper/loop0p1 mnt/boot
+          sudo mount /dev/mapper/loop0p2 mnt/rootfs
+          
+          sudo cp -r ../build_output/boot/* mnt/boot/
+          sudo cp -a debian_rootfs/root/* mnt/rootfs/
+          
+          sudo mkdir -p mnt/rootfs/boot
+          sudo cp -r ../build_output/boot/* mnt/rootfs/boot/
+          
+          sudo umount mnt/boot
+          sudo umount mnt/rootfs
+          sudo kpartx -d debian-tanix-w2.img
+          
+          xz -z -3 debian-tanix-w2.img
+
+      # --- ШАГ 5: СОХРАНЕНИЕ И ВЫГРУЗКА ОБРАЗА ---
+      - name: Upload Complete Debian Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Debian-XFCE-TanixW2-Wireless-Enabled
+          path: debian-tanix-w2.img.xz
