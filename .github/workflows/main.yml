@@ -26,7 +26,7 @@ jobs:
       - name: Clone CoreELEC Kernel & Compile
         run: |
           echo "Скачиваем исходные коды ядра..."
-          git clone --depth 1 -b amlogic-5.4.210 https://github.com kernel_source
+          git clone --depth 1 -b amlogic-5.4.210 https://github.com/CoreELEC/linux-amlogic.git kernel_source
           
           cd kernel_source
           echo "Текущая директория компиляции ядра: $(pwd)"
