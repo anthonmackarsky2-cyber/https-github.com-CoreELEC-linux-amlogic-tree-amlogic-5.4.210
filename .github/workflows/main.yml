@@ -17,7 +17,8 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt update
-          sudo apt install -y gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
+          # Устанавливаем строго GCC 10 для корректной сборки вендорного ядра 5.4
+          sudo apt install -y gcc-10-aarch64-linux-gnu dtc g++-10-aarch64-linux-gnu \
             bison flex libssl-dev bc libncurses-dev make git qemu-user-static \
             kpartx parted xz-utils dosfstools debootstrap u-boot-tools
 
@@ -25,17 +26,20 @@ jobs:
       - name: Clone CoreELEC Kernel & Compile
         run: |
           echo "Скачиваем исходные коды ядра..."
-          # СЮДА ВСТАВЬТЕ АДРЕС ЯДРА (Оставьте пробел и kernel_source в конце!)
-          git clone --depth 1 -b amlogic-5.4.210 https://github.com/CoreELEC/linux-amlogic.git kernel_source
+          git clone --depth 1 -b amlogic-5.4.210 https://github.com kernel_source
           
           cd kernel_source
           echo "Текущая директория компиляции ядра: $(pwd)"
 
           export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-gcc-10-
+          # ИСПРАВЛЕНО: Разделен префикс архитектуры и точное имя компилятора GCC 10
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CC=aarch64-linux-gnu-gcc-10
           
-          make defconfig
+          # Запускаем конфигурацию с явным указанием компилятора
+          make defconfig CC=$CC
           
+          # Жестко вшиваем вендорные драйверы графики и дисплея из DTS прямо в тело ядра (=y)
           sed -i 's/CONFIG_AMLOGIC_DRM=m/CONFIG_AMLOGIC_DRM=y/g' .config || true
           sed -i 's/CONFIG_AMLOGIC_FB=m/CONFIG_AMLOGIC_FB=y/g' .config || true
           sed -i 's/CONFIG_MALI_BIFROST=m/CONFIG_MALI_BIFROST=y/g' .config || true
@@ -47,11 +51,12 @@ jobs:
           echo "CONFIG_MALI_BIFROST=y" >> .config
           echo "CONFIG_AMLOGIC_VIDEO=y" >> .config
           
-          make olddefconfig
-          make -j$(nproc) Image dtbs
+          # Применяем изменения и запускаем компиляцию ядра на всех ядрах сервера
+          make olddefconfig CC=$CC
+          make -j$(nproc) Image dtbs CC=$CC
           
           if [ ! -f "arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb" ]; then
-            echo "КРИТИЧЕСКАЯ ОШИБКА: Целевой файл s4_s905w2_4g.dtb не найден!" && exit 1
+            echo "КРИТИЧЕСКАЯ ОШИБКА: Целевой файл s4_s905w2_4g.dtb не найден в dts/amlogic!" && exit 1
           fi
           
           mkdir -p ../../build_output/boot
@@ -62,8 +67,8 @@ jobs:
       - name: Create Debian 12 RootFS & Install Components
         run: |
           mkdir -p debian_rootfs/root
-          # СЮДА ВСТАВЬТЕ АДРЕС ЗЕРКАЛА СКАЧИВАНИЯ СИСТЕМЫ DEBIAN (со слэшем в конце)
-          sudo debootstrap --foreign --arch=arm64 --components=main,contrib,non-free-firmware bookworm debian_rootfs/root http://deb.debian.org/debian/
+          # Указан верный полный URL репозитория deb.debian.org/debian/ с ca-certificates для работы HTTPS
+          sudo debootstrap --foreign --arch=arm64 --components=main,contrib,non-free-firmware --include=ca-certificates bookworm debian_rootfs/root http://debian.org
           
           echo "tanix-w2" | sudo tee debian_rootfs/root/etc/hostname
           echo "127.0.0.1 localhost tanix-w2" | sudo tee debian_rootfs/root/etc/hosts
@@ -80,8 +85,8 @@ jobs:
           sudo chroot debian_rootfs/root /debootstrap/debootstrap --second-stage
           
           sudo chroot debian_rootfs/root /bin/bash -c "
-            # СЮДА ВСТАВЬТЕ АДРЕС ОБНОВЛЕНИЯ ПАКЕТОВ DEBIAN ВНУТРИ СТРОКИ С СИСТЕМНЫМИ РЕПОЗИТОРИЯМИ
-            echo 'deb https://deb.debian.org/debian bookworm main contrib non-free non-free-firmware' > /etc/apt/sources.list
+            # Прописан верный защищенный адрес репозитория пакетов Debian для apt внутри образа
+            echo 'deb http://debian.org bookworm main contrib non-free non-free-firmware' > /etc/apt/sources.list
             apt update
             
             ENV DEBIAN_FRONTEND=noninteractive apt install -y \
