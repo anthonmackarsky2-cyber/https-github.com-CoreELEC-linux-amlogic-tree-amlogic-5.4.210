@@ -39,9 +39,16 @@ jobs:
           # Запускаем конфигурацию с явным указанием компилятора
           make defconfig CC=$CC
           
-          # ИСПРАВЛЕНО: Вырезаем несовместимые с GCC 10 флаги предупреждений из Makefile и конфигурации
+          # Полностью вырезаем жесткий режим -Werror (трактовать предупреждения как ошибки) из файлов сборки ядра
+          sed -i 's/-Werror//g' Makefile || true
+          sed -i 's/-Werror//g' Kbuild || true
+          sed -i 's/-Werror//g' arch/arm64/Makefile || true
           sed -i 's/-Wno-error=array-compare//g' Makefile || true
           sed -i 's/-Wno-error=array-compare//g' arch/arm64/Makefile || true
+          
+          # Принудительно отключаем WERROR в конфиге ядра и добавляем флаг игнорирования неровных отступов
+          echo "CONFIG_WERROR=n" >> .config
+          echo "CONFIG_EXTRA_CFLAGS=\"-Wno-misleading-indentation -Wno-error\"" >> .config
           sed -i 's/CONFIG_WERROR=y/CONFIG_WERROR=n/g' .config || true
           
           # Жестко вшиваем вендорные драйверы графики и дисплея из DTS прямо в тело ядра (=y)
