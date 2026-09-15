@@ -1,4 +1,4 @@
-name: Build Debian Light with Double Boot Configuration for Tanix W2
+name: Build Debian 12 Desktop (XFCE) for Tanix W2
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
 
 jobs:
   build-debian-image:
+    # Виртуальная машина GitHub Actions для компиляции
     runs-on: ubuntu-22.04
 
     steps:
@@ -17,22 +18,36 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt update
-          # Устанавливаем строго GCC 10 для корректной компиляции ядра 5.4
+          # Устанавливаем GCC 10 для корректной компиляции ядра 5.4 без синтаксических ошибок совместимости
           sudo apt install -y gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
             bison flex libssl-dev bc libncurses-dev make git qemu-user-static \
             kpartx parted xz-utils dosfstools debootstrap u-boot-tools
 
-      # --- ШАГ 1: ИСПОЛЬЗОВАНИЕ DEFCONFIG И СБОРКА ЯДРА НА GCC 10 ---
+      # --- ШАГ 1: АВТОПОИСК ИСХОДНИКОВ ЯДРА, ВСТРАИВАНИЕ ДРАЙВЕРОВ И СБОРКА НА GCC 10 ---
       - name: Compile Linux Kernel with Built-in Vendor Drivers
         run: |
+          echo "Текущая рабочая директория: $(pwd)"
+          ls -la
+          
+          # Если репозиторий клонировался во вложенную подпапку, находим, где лежит Makefile ядра
+          if [ ! -f "Makefile" ]; then
+            TARGET_DIR=$(find . -maxdepth 2 -name "Makefile" -exec dirname {} \;)
+            if [ -n "$TARGET_DIR" ]; then
+              cd "$TARGET_DIR"
+              echo "Перешли в папку с исходным кодом ядра: $(pwd)"
+              ls -la
+            else
+              echo "КРИТИЧЕСКАЯ ОШИБКА: Файл Makefile ядра не найден!" && exit 1
+            fi
+          fi
+
           export ARCH=arm64
-          # Указываем точный префикс компилятора GCC 10
           export CROSS_COMPILE=aarch64-linux-gnu-gcc-10-
           
-          # Загружаем стандартную базовую конфигурацию ядра
+          # Загружаем базовую конфигурацию ядра
           make defconfig
           
-          # Жестко вшиваем вендорные драйверы графики и фреймбуфера прямо в ядро (=y)
+          # Жестко вшиваем вендорные драйверы графики и дисплея из DTS прямо в тело ядра (=y)
           sed -i 's/CONFIG_AMLOGIC_DRM=m/CONFIG_AMLOGIC_DRM=y/g' .config || true
           sed -i 's/CONFIG_AMLOGIC_FB=m/CONFIG_AMLOGIC_FB=y/g' .config || true
           sed -i 's/CONFIG_MALI_BIFROST=m/CONFIG_MALI_BIFROST=y/g' .config || true
@@ -47,18 +62,21 @@ jobs:
           make olddefconfig
           make -j$(nproc) Image dtbs
           
+          # Проверяем, скомпилировался ли DTB файл для Tanix W2 4G
           if [ ! -f "arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb" ]; then
-            echo "КРИТИЧЕСКАЯ ОШИБКА: Файл s4_s905w2_4g.dtb не найден!" && exit 1
+            echo "КРИТИЧЕСКАЯ ОШИБКА: Файл s4_s905w2_4g.dtb не найден в dts/amlogic!" && exit 1
           fi
           
-          mkdir -p ../build_output/boot
-          cp arch/arm64/boot/Image ../build_output/boot/vmlinuz-5.4.210
-          cp arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb ../build_output/boot/dtb.img
+          # Сохраняем результаты компиляции во внешнюю папку вывода
+          mkdir -p ../../build_output/boot
+          cp arch/arm64/boot/Image ../../build_output/boot/vmlinuz-5.4.210
+          cp arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb ../../build_output/boot/dtb.img
 
-      # --- ШАГ 2: СОЗДАНИЕ ROOTFS И УСТАНОВКА XFCE4 + LIGHTDM ---
-      - name: Create Debian RootFS & Install Light Components
+      # --- ШАГ 2: СОЗДАНИЕ ROOTFS ДЛЯ DEBIAN 12 И УСТАНОВКА КОМПОНЕНТОВ ---
+      - name: Create Debian 12 RootFS & Install Components
         run: |
           mkdir -p debian_rootfs/root
+          # Разворачиваем чистую базовую систему Debian 12 (Bookworm)
           sudo debootstrap --foreign --arch=arm64 --components=main,contrib,non-free-firmware bookworm debian_rootfs/root http://debian.org
           
           echo "tanix-w2" | sudo tee debian_rootfs/root/etc/hostname
@@ -79,48 +97,57 @@ jobs:
             echo 'deb http://debian.org bookworm main contrib non-free non-free-firmware' > /etc/apt/sources.list
             apt update
             
+            # Установка графической среды XFCE4, LightDM, mc, статус-баров и сетевых утилит
             ENV DEBIAN_FRONTEND=noninteractive apt install -y \
               openssh-server sudo mc bluez blueman waybar tint2 xinit lxterminal \
               xserver-xorg xserver-xorg-video-fbdev weston xwayland \
               lightdm task-xfce-desktop
             
+            # Установка пакетов для автоподключения USB флешек и внешних дисков (NTFS, exFAT)
             ENV DEBIAN_FRONTEND=noninteractive apt install -y \
               gvfs gvfs-backends thunar-volman udisks2 ntfs-3g exfat-fuse || apt install -y gvfs gvfs-backends thunar-volman udisks2 ntfs-3g exfat-fuse exfat-utils
               
+            # Драйверы и прошивки для USB Wi-Fi и Bluetooth адаптеров (Realtek, Mediatek, Atheros)
             ENV DEBIAN_FRONTEND=noninteractive apt install -y \
               firmware-linux firmware-linux-nonfree firmware-realtek firmware-liberation firmware-atheros \
               wireless-tools wpasupplicant network-manager NetworkManager-gnome
             
+            # Настройка пользователей (root:root и al:6770)
             echo 'root:root' | chpasswd
             useradd -m -s /bin/bash al
             echo 'al:6770' | chpasswd
             
+            # Добавление пользователей в системные группы управления, видео и сетей
             for grp in sudo adm disk video render bluetooth input plugdev netdev; do
               groupadd -f \$grp
               usermod -aG \$grp al
               usermod -aG \$grp root
             done
             
+            # Настройка неограниченных sudo прав без ввода пароля для al
             echo 'root ALL=(ALL:ALL) ALL' > /etc/sudoers.d/custom-rights
             echo 'al ALL=(ALL:ALL) NOPASSWD:ALL' >> /etc/sudoers.d/custom-rights
             chmod 0440 /etc/sudoers.d/custom-rights
             
+            # Активация автозапуска ключевых служб дисплея, сети и SSH
             systemctl enable NetworkManager
             systemctl enable bluetooth
             systemctl enable ssh
             systemctl enable lightdm
             
+            # Разрешение удаленного root-доступа по SSH
             sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
             sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
             ssh-keygen -A
           "
           sudo rm debian_rootfs/root/usr/bin/qemu-aarch64-static
 
-      # --- ШАГ 3: ДВОЙНАЯ КОНФИГУРАЦИЯ ЗАГРУЗЧИКА (СТРАХОВКА U-BOOT) ---
+      # --- ШАГ 3: ДВОЙНАЯ КОНФИГУРАЦИЯ ЗАГРУЗЧИКА ДЛЯ U-BOOT ПОД СТРАХОВКУ ---
       - name: Create Boot Configuration (Extlinux + uEnv.txt)
         run: |
           mkdir -p ../build_output/boot/extlinux
           
+          # Вариант 1: Современная структура extlinux
           cat << 'EOF' > ../build_output/boot/extlinux/extlinux.conf
           LABEL Debian
             LINUX /vmlinuz-5.4.210
@@ -128,15 +155,16 @@ jobs:
             APPEND root=/dev/mmcblk1p2 rootwait console=ttyAML0,115200n8 console=tty0 loglevel=7 init=/sbin/init rootfstype=ext4 rw amlogic.hdmi=1920x1080M60Hz
           EOF
 
+          # Вариант 2: Классический файл uEnv.txt для вендорных заводских u-boot
           cat << 'EOF2' > ../build_output/boot/uEnv.txt
-          title=Debian XFCE for Tanix W2
+          title=Debian 12 XFCE for Tanix W2
           kernel=/vmlinuz-5.4.210
           dtb=/dtb.img
           bootargs=root=/dev/mmcblk1p2 rootwait console=ttyAML0,115200n8 console=tty0 loglevel=7 init=/sbin/init rootfstype=ext4 rw amlogic.hdmi=1920x1080M60Hz
           uenvcmd=fatload mmc 0:1 ${kernel_addr_r} ${kernel}; fatload mmc 0:1 ${fdt_addr_r} ${dtb}; bootz ${kernel_addr_r} - ${fdt_addr_r}
           EOF2
 
-      # --- ШАГ 4: СБОРКА ОБРАЗА .IMG ДЛЯ ЗАПИСИ (4.2 ГБ) ---
+      # --- ШАГ 4: РАЗМЕТКА И СБОРКА ИТОГОВОГО ОБРАЗА .IMG (4.2 ГБ) ---
       - name: Create Final Flashable .IMG
         run: |
           dd if=/dev/zero of=debian-tanix-w2.img bs=1M count=4200
@@ -154,9 +182,11 @@ jobs:
           sudo mount /dev/mapper/loop0p1 mnt/boot
           sudo mount /dev/mapper/loop0p2 mnt/rootfs
           
+          # Перенос файлов ядра, uEnv, extlinux и RootFS Debian 12 на разделы образа
           sudo cp -r ../build_output/boot/* mnt/boot/
           sudo cp -a debian_rootfs/root/* mnt/rootfs/
           
+          # Дублируем файлы загрузки в системную папку /boot ОС
           sudo mkdir -p mnt/rootfs/boot
           sudo cp -r ../build_output/boot/* mnt/rootfs/boot/
           
@@ -164,9 +194,10 @@ jobs:
           sudo umount mnt/rootfs
           sudo kpartx -d debian-tanix-w2.img
           
+          # Максимально сжимаем готовый образ архиватором xz
           xz -z -3 debian-tanix-w2.img
 
-      # --- ШАГ 5: СОХРАНЕНИЕ И ВЫГРУЗКА ОБРАЗА ---
+      # --- ШАГ 5: СОХРАНЕНИЕ И ВЫГРУЗКА ГОТОВОГО АРТЕФАКТА ---
       - name: Upload Complete Debian Image
         uses: actions/upload-artifact@v4
         with:
