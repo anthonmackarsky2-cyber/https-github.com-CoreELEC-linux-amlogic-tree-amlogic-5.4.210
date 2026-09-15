@@ -53,7 +53,8 @@ jobs:
           
           # Применяем изменения и запускаем компиляцию ядра на всех ядрах сервера
           make olddefconfig CC=$CC
-          make -j$(nproc) Image dtbs CC=$CC
+          make -j$(nproc) Image CC=$CC
+          make -j$(nproc) amlogic/s4_s905w2_4g.dtb CC=$CC
           
           if [ ! -f "arch/arm64/boot/dts/amlogic/s4_s905w2_4g.dtb" ]; then
             echo "КРИТИЧЕСКАЯ ОШИБКА: Целевой файл s4_s905w2_4g.dtb не найден в dts/amlogic!" && exit 1
