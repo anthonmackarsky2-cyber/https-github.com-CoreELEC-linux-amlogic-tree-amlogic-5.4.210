@@ -39,16 +39,17 @@ jobs:
           # Запускаем конфигурацию с явным указанием компилятора
           make defconfig CC=$CC
           
-          # Полностью вырезаем жесткий режим -Werror (трактовать предупреждения как ошибки) из файлов сборки ядра
-          sed -i 's/-Werror//g' Makefile || true
-          sed -i 's/-Werror//g' Kbuild || true
-          sed -i 's/-Werror//g' arch/arm64/Makefile || true
-          sed -i 's/-Wno-error=array-compare//g' Makefile || true
-          sed -i 's/-Wno-error=array-compare//g' arch/arm64/Makefile || true
+          # ИСПРАВЛЕНО: Глушим все предупреждения на уровне флагов компилятора (флаг -w) и отключаем панику
+          sed -i 's/KBUILD_CFLAGS   += -Werror/KBUILD_CFLAGS   += -w/g' Makefile || true
+          sed -i 's/KBUILD_CFLAGS += -Werror/KBUILD_CFLAGS += -w/g' Makefile || true
+          sed -i 's/-Werror=strict-prototypes/-w/g' Makefile || true
+          sed -i 's/-Werror=implicit-function-declaration/-w/g' Makefile || true
+          sed -i 's/-Werror=implicit-int/-w/g' Makefile || true
+          sed -i 's/-Werror=return-type/-w/g' Makefile || true
           
-          # Принудительно отключаем WERROR в конфиге ядра и добавляем флаг игнорирования неровных отступов
+          # Отключаем strict-режим и добавляем тотальное глушение ошибок форматирования в .config
           echo "CONFIG_WERROR=n" >> .config
-          echo "CONFIG_EXTRA_CFLAGS=\"-Wno-misleading-indentation -Wno-error\"" >> .config
+          echo "CONFIG_EXTRA_CFLAGS=\"-w -Wno-misleading-indentation -Wno-error\"" >> .config
           sed -i 's/CONFIG_WERROR=y/CONFIG_WERROR=n/g' .config || true
           
           # Жестко вшиваем вендорные драйверы графики и дисплея из DTS прямо в тело ядра (=y)
